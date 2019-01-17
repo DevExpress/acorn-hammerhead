@@ -1,6 +1,6 @@
 {
   "validations": {
-    "vulnerableDependencies": true,
+    "vulnerableDependencies": false,
     "uncommittedChanges": true,
     "untrackedFiles": true,
     "sensitiveData": false,
@@ -10,6 +10,6 @@
   "confirm": false,
   "publishCommand": "npm publish",
   "publishTag": "latest",
-  "prePublishScript": false,
+  "prePublishScript": "gulp build",
   "postPublishScript": false
 }
