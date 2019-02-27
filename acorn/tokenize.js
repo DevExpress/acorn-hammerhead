@@ -2,6 +2,7 @@ import {isIdentifierStart, isIdentifierChar} from "./identifier"
 import {types as tt, keywords as keywordTypes} from "./tokentype"
 import {Parser} from "./state"
 import {SourceLocation} from "./locutil"
+import {RegExpValidationState} from "./regexp"
 import {lineBreak, lineBreakG, isNewLine, nonASCIIwhitespace} from "./whitespace"
 
 // Object type used to represent tokens. Note that normally, tokens
@@ -24,9 +25,6 @@ export class Token {
 // ## Tokenizer
 
 const pp = Parser.prototype
-
-// Are we running under Rhino?
-const isRhino = typeof Packages == "object" && Object.prototype.toString.call(Packages) == "[object JavaPackage]"
 
 // Move to the next token
 
@@ -221,7 +219,7 @@ pp.readToken_mult_modulo_exp = function(code) { // '%*'
   let tokentype = code === 42 ? tt.star : tt.modulo
 
   // exponentiation operator ** and **=
-  if (this.options.ecmaVersion >= 7 && next === 42) {
+  if (this.options.ecmaVersion >= 7 && code === 42 && next === 42) {
     ++size
     tokentype = tt.starstar
     next = this.input.charCodeAt(this.pos + 2)
@@ -247,7 +245,7 @@ pp.readToken_caret = function() { // '^'
 pp.readToken_plus_min = function(code) { // '+-'
   let next = this.input.charCodeAt(this.pos + 1)
   if (next === code) {
-    if (next == 45 && !this.inModule && this.input.charCodeAt(this.pos + 2) == 62 &&
+    if (next === 45 && !this.inModule && this.input.charCodeAt(this.pos + 2) === 62 &&
         (this.lastTokEnd === 0 || lineBreak.test(this.input.slice(this.lastTokEnd, this.pos)))) {
       // A `-->` line comment
       this.skipLineComment(3)
@@ -268,8 +266,8 @@ pp.readToken_lt_gt = function(code) { // '<>'
     if (this.input.charCodeAt(this.pos + size) === 61) return this.finishOp(tt.assign, size + 1)
     return this.finishOp(tt.bitShift, size)
   }
-  if (next == 33 && code == 60 && !this.inModule && this.input.charCodeAt(this.pos + 2) == 45 &&
-      this.input.charCodeAt(this.pos + 3) == 45) {
+  if (next === 33 && code === 60 && !this.inModule && this.input.charCodeAt(this.pos + 2) === 45 &&
+      this.input.charCodeAt(this.pos + 3) === 45) {
     // `<!--`, an XML-style comment that should be interpreted as a line comment
     this.skipLineComment(4)
     this.skipSpace()
@@ -291,12 +289,12 @@ pp.readToken_eq_excl = function(code) { // '=!'
 
 pp.getTokenFromCode = function(code) {
   switch (code) {
-    // The interpretation of a dot depends on whether it is followed
-    // by a digit or another two dots.
+  // The interpretation of a dot depends on whether it is followed
+  // by a digit or another two dots.
   case 46: // '.'
     return this.readToken_dot()
 
-    // Punctuation tokens.
+  // Punctuation tokens.
   case 40: ++this.pos; return this.finishToken(tt.parenL)
   case 41: ++this.pos; return this.finishToken(tt.parenR)
   case 59: ++this.pos; return this.finishToken(tt.semi)
@@ -320,19 +318,20 @@ pp.getTokenFromCode = function(code) {
       if (next === 111 || next === 79) return this.readRadixNumber(8) // '0o', '0O' - octal number
       if (next === 98 || next === 66) return this.readRadixNumber(2) // '0b', '0B' - binary number
     }
-    // Anything else beginning with a digit is an integer, octal
-    // number, or float.
+
+  // Anything else beginning with a digit is an integer, octal
+  // number, or float.
   case 49: case 50: case 51: case 52: case 53: case 54: case 55: case 56: case 57: // 1-9
     return this.readNumber(false)
 
-    // Quotes produce strings.
+  // Quotes produce strings.
   case 34: case 39: // '"', "'"
     return this.readString(code)
 
-    // Operators are parsed inline in tiny state machines. '=' (61) is
-    // often referred to. `finishOp` simply skips the amount of
-    // characters it is given as second argument, and returns a token
-    // of the type given by its first argument.
+  // Operators are parsed inline in tiny state machines. '=' (61) is
+  // often referred to. `finishOp` simply skips the amount of
+  // characters it is given as second argument, and returns a token
+  // of the type given by its first argument.
 
   case 47: // '/'
     return this.readToken_slash()
@@ -368,22 +367,6 @@ pp.finishOp = function(type, size) {
   return this.finishToken(type, str)
 }
 
-// Parse a regular expression. Some context-awareness is necessary,
-// since a '/' inside a '[]' set does not end the expression.
-
-function tryCreateRegexp(src, flags, throwErrorAt, parser) {
-  try {
-    return new RegExp(src, flags)
-  } catch (e) {
-    if (throwErrorAt !== undefined) {
-      if (e instanceof SyntaxError) parser.raise(throwErrorAt, "Error parsing regular expression: " + e.message)
-      throw e
-    }
-  }
-}
-
-const regexpUnicodeSupport = !!tryCreateRegexp("\uffff", "u")
-
 pp.readRegexp = function() {
   let escaped, inClass, start = this.pos
   for (;;) {
@@ -398,49 +381,28 @@ pp.readRegexp = function() {
     } else escaped = false
     ++this.pos
   }
-  let content = this.input.slice(start, this.pos)
+  let pattern = this.input.slice(start, this.pos)
   ++this.pos
-  // Need to use `readWord1` because '\uXXXX' sequences are allowed
-  // here (don't ask).
-  let mods = this.readWord1()
-  let tmp = content, tmpFlags = ""
-  if (mods) {
-    let validFlags = /^[gim]*$/
-    if (this.options.ecmaVersion >= 6) validFlags = /^[gimuy]*$/
-    if (!validFlags.test(mods)) this.raise(start, "Invalid regular expression flag")
-    if (mods.indexOf("u") >= 0) {
-      if (regexpUnicodeSupport) {
-        tmpFlags = "u"
-      } else {
-        // Replace each astral symbol and every Unicode escape sequence that
-        // possibly represents an astral symbol or a paired surrogate with a
-        // single ASCII symbol to avoid throwing on regular expressions that
-        // are only valid in combination with the `/u` flag.
-        // Note: replacing with the ASCII symbol `x` might cause false
-        // negatives in unlikely scenarios. For example, `[\u{61}-b]` is a
-        // perfectly valid pattern that is equivalent to `[a-b]`, but it would
-        // be replaced by `[x-b]` which throws an error.
-        tmp = tmp.replace(/\\u\{([0-9a-fA-F]+)\}/g, (_match, code, offset) => {
-          code = Number("0x" + code)
-          if (code > 0x10FFFF) this.raise(start + offset + 3, "Code point out of bounds")
-          return "x"
-        })
-        tmp = tmp.replace(/\\u([a-fA-F0-9]{4})|[\uD800-\uDBFF][\uDC00-\uDFFF]/g, "x")
-        tmpFlags = tmpFlags.replace("u", "")
-      }
-    }
-  }
-  // Detect invalid regular expressions.
+  let flagsStart = this.pos
+  let flags = this.readWord1()
+  if (this.containsEsc) this.unexpected(flagsStart)
+
+  // Validate pattern
+  const state = this.regexpState || (this.regexpState = new RegExpValidationState(this))
+  state.reset(start, pattern, flags)
+  this.validateRegExpFlags(state)
+  this.validateRegExpPattern(state)
+
+  // Create Literal#value property value.
   let value = null
-  // Rhino's regular expression parser is flaky and throws uncatchable exceptions,
-  // so don't do detection if we are running under Rhino
-  if (!isRhino) {
-    tryCreateRegexp(tmp, tmpFlags, start, this)
-    // Get a regular expression object for this pattern-flag pair, or `null` in
-    // case the current environment doesn't support the flags it uses.
-    value = tryCreateRegexp(content, mods)
+  try {
+    value = new RegExp(pattern, flags)
+  } catch (e) {
+    // ESTree requires null if it failed to instantiate RegExp object.
+    // https://github.com/estree/estree/blob/a27003adf4fd7bfad44de9cef372a2eacd527b1c/es5.md#regexpliteral
   }
-  return this.finishToken(tt.regexp, {pattern: content, flags: mods, value: value})
+
+  return this.finishToken(tt.regexp, {pattern, flags, value})
 }
 
 // Read an integer in the given radix. Return null if zero digits
@@ -475,30 +437,26 @@ pp.readRadixNumber = function(radix) {
 // Read an integer, octal integer, or floating-point number.
 
 pp.readNumber = function(startsWithDot) {
-  let start = this.pos, isFloat = false, octal = this.input.charCodeAt(this.pos) === 48
+  let start = this.pos
   if (!startsWithDot && this.readInt(10) === null) this.raise(start, "Invalid number")
-  if (octal && this.pos == start + 1) octal = false
+  let octal = this.pos - start >= 2 && this.input.charCodeAt(start) === 48
+  if (octal && this.strict) this.raise(start, "Invalid number")
+  if (octal && /[89]/.test(this.input.slice(start, this.pos))) octal = false
   let next = this.input.charCodeAt(this.pos)
   if (next === 46 && !octal) { // '.'
     ++this.pos
     this.readInt(10)
-    isFloat = true
     next = this.input.charCodeAt(this.pos)
   }
   if ((next === 69 || next === 101) && !octal) { // 'eE'
     next = this.input.charCodeAt(++this.pos)
     if (next === 43 || next === 45) ++this.pos // '+-'
     if (this.readInt(10) === null) this.raise(start, "Invalid number")
-    isFloat = true
   }
   if (isIdentifierStart(this.fullCharCodeAtPos())) this.raise(this.pos, "Identifier directly after number")
 
-  let str = this.input.slice(start, this.pos), val
-  if (isFloat) val = parseFloat(str)
-  else if (!octal || str.length === 1) val = parseInt(str, 10)
-  else if (this.strict) this.raise(start, "Invalid number")
-  else if (/[89]/.test(str)) val = parseInt(str, 10)
-  else val = parseInt(str, 8)
+  let str = this.input.slice(start, this.pos)
+  let val = octal ? parseInt(str, 8) : parseFloat(str)
   return this.finishToken(tt.num, val)
 }
 
@@ -537,7 +495,7 @@ pp.readString = function(quote) {
       out += this.readEscapedChar(false)
       chunkStart = this.pos
     } else {
-      if (isNewLine(ch)) this.raise(this.start, "Unterminated string constant")
+      if (isNewLine(ch, this.options.ecmaVersion >= 10)) this.raise(this.start, "Unterminated string constant")
       ++this.pos
     }
   }
@@ -667,11 +625,22 @@ pp.readEscapedChar = function(inTemplate) {
         octalStr = octalStr.slice(0, -1)
         octal = parseInt(octalStr, 8)
       }
-      if (octalStr !== "0" && (this.strict || inTemplate)) {
-        this.invalidStringToken(this.pos - 2, "Octal literal in strict mode")
-      }
       this.pos += octalStr.length - 1
+      ch = this.input.charCodeAt(this.pos)
+      if ((octalStr !== "0" || ch === 56 || ch === 57) && (this.strict || inTemplate)) {
+        this.invalidStringToken(
+          this.pos - 1 - octalStr.length,
+          inTemplate
+            ? "Octal literal in template string"
+            : "Octal literal in strict mode"
+        )
+      }
       return String.fromCharCode(octal)
+    }
+    if (isNewLine(ch)) {
+      // Unicode new line characters after \ get removed from output in both
+      // template literals and strings
+      return ""
     }
     return String.fromCharCode(ch)
   }
@@ -704,13 +673,13 @@ pp.readWord1 = function() {
       this.containsEsc = true
       word += this.input.slice(chunkStart, this.pos)
       let escStart = this.pos
-      if (this.input.charCodeAt(++this.pos) != 117) // "u"
+      if (this.input.charCodeAt(++this.pos) !== 117) // "u"
         this.invalidStringToken(this.pos, "Expecting Unicode escape sequence \\uXXXX")
       ++this.pos
       let esc = this.readCodePoint()
       if (!(first ? isIdentifierStart : isIdentifierChar)(esc, astral))
         this.invalidStringToken(escStart, "Invalid Unicode escape")
-      word += this.input.substr(this.pos-6, 6);
+      word += this.input.substr(this.pos-6, 6)
       chunkStart = this.pos
     } else {
       break
