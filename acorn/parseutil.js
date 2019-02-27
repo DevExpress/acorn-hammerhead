@@ -6,15 +6,22 @@ const pp = Parser.prototype
 
 // ## Parser utilities
 
-const literal = /^(?:'((?:\\.|[^'])*?)'|"((?:\\.|[^"])*?)"|;)/
+const literal = /^(?:'((?:\\.|[^'])*?)'|"((?:\\.|[^"])*?)")/
 pp.strictDirective = function(start) {
   for (;;) {
+    // Try to find string literal.
     skipWhiteSpace.lastIndex = start
     start += skipWhiteSpace.exec(this.input)[0].length
     let match = literal.exec(this.input.slice(start))
     if (!match) return false
-    if ((match[1] || match[2]) == "use strict") return false
+    if ((match[1] || match[2]) === "use strict") return false
     start += match[0].length
+
+    // Skip semicolon, if any.
+    skipWhiteSpace.lastIndex = start
+    start += skipWhiteSpace.exec(this.input)[0].length
+    if (this.input[start] === ";")
+      start++
   }
 }
 
@@ -33,13 +40,15 @@ pp.eat = function(type) {
 // Tests whether parsed token is a contextual keyword.
 
 pp.isContextual = function(name) {
-  return this.type === tt.name && this.value === name
+  return this.type === tt.name && this.value === name && !this.containsEsc
 }
 
 // Consumes contextual keyword if possible.
 
 pp.eatContextual = function(name) {
-  return this.value === name && this.eat(tt.name)
+  if (!this.isContextual(name)) return false
+  this.next()
+  return true
 }
 
 // Asserts that following token is given contextual keyword.
@@ -72,7 +81,7 @@ pp.semicolon = function() {
 }
 
 pp.afterTrailingComma = function(tokType, notNext) {
-  if (this.type == tokType) {
+  if (this.type === tokType) {
     if (this.options.onTrailingComma)
       this.options.onTrailingComma(this.lastTokStart, this.lastTokStartLoc)
     if (!notNext)
@@ -99,6 +108,7 @@ export function DestructuringErrors() {
   this.trailingComma =
   this.parenthesizedAssign =
   this.parenthesizedBind =
+  this.doubleProto =
     -1
 }
 
@@ -111,9 +121,13 @@ pp.checkPatternErrors = function(refDestructuringErrors, isAssign) {
 }
 
 pp.checkExpressionErrors = function(refDestructuringErrors, andThrow) {
-  let pos = refDestructuringErrors ? refDestructuringErrors.shorthandAssign : -1
-  if (!andThrow) return pos >= 0
-  if (pos > -1) this.raise(pos, "Shorthand property assignments are valid only in destructuring patterns")
+  if (!refDestructuringErrors) return false
+  let {shorthandAssign, doubleProto} = refDestructuringErrors
+  if (!andThrow) return shorthandAssign >= 0 || doubleProto >= 0
+  if (shorthandAssign >= 0)
+    this.raise(shorthandAssign, "Shorthand property assignments are valid only in destructuring patterns")
+  if (doubleProto >= 0)
+    this.raiseRecoverable(doubleProto, "Redefinition of __proto__ property")
 }
 
 pp.checkYieldAwaitInDefaultParams = function() {
