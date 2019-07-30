@@ -120,6 +120,14 @@ pp.parseStatement = function(context, topLevel, exports) {
   case tt.semi: return this.parseEmptyStatement(node)
   case tt._export:
   case tt._import:
+    if (this.options.ecmaVersion > 10 && starttype === tt._import) {
+      skipWhiteSpace.lastIndex = this.pos
+      let skip = skipWhiteSpace.exec(this.input)
+      let next = this.pos + skip[0].length, nextCh = this.input.charCodeAt(next)
+      if (nextCh === 40) // '('
+        return this.parseExpressionStatement(node, this.parseExpression())
+    }
+
     if (!this.options.allowImportExportEverywhere) {
       if (!topLevel)
         this.raise(this.start, "'import' and 'export' may only appear at the top level")
@@ -215,8 +223,7 @@ pp.parseForStatement = function(node) {
     this.next()
     this.parseVar(init, true, kind)
     this.finishNode(init, "VariableDeclaration")
-    if ((this.type === tt._in || (this.options.ecmaVersion >= 6 && this.isContextual("of"))) && init.declarations.length === 1 &&
-        !(kind !== "var" && init.declarations[0].init)) {
+    if ((this.type === tt._in || (this.options.ecmaVersion >= 6 && this.isContextual("of"))) && init.declarations.length === 1) {
       if (this.options.ecmaVersion >= 9) {
         if (this.type === tt._in) {
           if (awaitAt > -1) this.unexpected(awaitAt)
@@ -446,21 +453,36 @@ pp.parseFor = function(node, init) {
 // same from parser's perspective.
 
 pp.parseForIn = function(node, init) {
-  let type = this.type === tt._in ? "ForInStatement" : "ForOfStatement"
+  const isForIn = this.type === tt._in
   this.next()
-  if (type === "ForInStatement") {
-    if (init.type === "AssignmentPattern" ||
-      (init.type === "VariableDeclaration" && init.declarations[0].init != null &&
-       (this.strict || init.declarations[0].id.type !== "Identifier")))
-      this.raise(init.start, "Invalid assignment in for-in loop head")
+
+  if (
+    init.type === "VariableDeclaration" &&
+    init.declarations[0].init != null &&
+    (
+      !isForIn ||
+      this.options.ecmaVersion < 8 ||
+      this.strict ||
+      init.kind !== "var" ||
+      init.declarations[0].id.type !== "Identifier"
+    )
+  ) {
+    this.raise(
+      init.start,
+      `${
+        isForIn ? "for-in" : "for-of"
+      } loop variable declaration may not have an initializer`
+    )
+  } else if (init.type === "AssignmentPattern") {
+    this.raise(init.start, "Invalid left-hand side in for-loop")
   }
   node.left = init
-  node.right = type === "ForInStatement" ? this.parseExpression() : this.parseMaybeAssign()
+  node.right = isForIn ? this.parseExpression() : this.parseMaybeAssign()
   this.expect(tt.parenR)
   node.body = this.parseStatement("for")
   this.exitScope()
   this.labels.pop()
-  return this.finishNode(node, type)
+  return this.finishNode(node, isForIn ? "ForInStatement" : "ForOfStatement")
 }
 
 // Parse a list of variable declarations.
@@ -487,9 +509,6 @@ pp.parseVar = function(node, isFor, kind) {
 }
 
 pp.parseVarId = function(decl, kind) {
-  if ((kind === "const" || kind === "let") && this.isContextual("let")) {
-    this.raiseRecoverable(this.start, "let is disallowed as a lexically bound name")
-  }
   decl.id = this.parseBindingAtom()
   this.checkLVal(decl.id, kind === "var" ? BIND_VAR : BIND_LEXICAL, false)
 }
@@ -637,7 +656,7 @@ pp.parseClassMethod = function(method, isGenerator, isAsync, allowsDirectSuper) 
 pp.parseClassId = function(node, isStatement) {
   if (this.type === tt.name) {
     node.id = this.parseIdent()
-    if (isStatement === true)
+    if (isStatement)
       this.checkLVal(node.id, BIND_LEXICAL, false)
   } else {
     if (isStatement === true)
