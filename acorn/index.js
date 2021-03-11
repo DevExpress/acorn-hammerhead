@@ -14,25 +14,66 @@
 //
 // [walk]: util/walk.js
 
-import {Parser} from "./state"
-import "./parseutil"
-import "./statement"
-import "./lval"
-import "./expression"
-import "./location"
-import "./scope"
+import {Parser} from "./state.js"
+import "./parseutil.js"
+import "./statement.js"
+import "./lval.js"
+import "./expression.js"
+import "./location.js"
+import "./scope.js"
 
-export {Parser} from "./state"
-export {defaultOptions} from "./options"
-export {Position, SourceLocation, getLineInfo} from "./locutil"
-export {Node} from "./node"
-export {TokenType, types as tokTypes, keywords as keywordTypes} from "./tokentype"
-export {TokContext, types as tokContexts} from "./tokencontext"
-export {isIdentifierChar, isIdentifierStart} from "./identifier"
-export {Token} from "./tokenize"
-export {isNewLine, lineBreak, lineBreakG, nonASCIIwhitespace} from "./whitespace"
+import {defaultOptions} from "./options.js"
+import {Position, SourceLocation, getLineInfo} from "./locutil.js"
+import {Node} from "./node.js"
+import {TokenType, types as tokTypes, keywords as keywordTypes} from "./tokentype.js"
+import {TokContext, types as tokContexts} from "./tokencontext.js"
+import {isIdentifierChar, isIdentifierStart} from "./identifier.js"
+import {Token} from "./tokenize.js"
+import {isNewLine, lineBreak, lineBreakG, nonASCIIwhitespace} from "./whitespace.js"
 
-export const version = "6.2.1"
+export const version = "8.1.0"
+export {
+  Parser,
+  defaultOptions,
+  Position,
+  SourceLocation,
+  getLineInfo,
+  Node,
+  TokenType,
+  tokTypes,
+  keywordTypes,
+  TokContext,
+  tokContexts,
+  isIdentifierChar,
+  isIdentifierStart,
+  Token,
+  isNewLine,
+  lineBreak,
+  lineBreakG,
+  nonASCIIwhitespace
+}
+
+Parser.acorn = {
+  Parser,
+  version,
+  defaultOptions,
+  Position,
+  SourceLocation,
+  getLineInfo,
+  Node,
+  TokenType,
+  tokTypes,
+  keywordTypes,
+  TokContext,
+  tokContexts,
+  isIdentifierChar,
+  isIdentifierStart,
+  Token,
+  isNewLine,
+  lineBreak,
+  lineBreakG,
+  nonASCIIwhitespace
+}
 
 // The main exported interface (under `self.acorn` when in the
 // browser) is a `parse` function that takes a code string and

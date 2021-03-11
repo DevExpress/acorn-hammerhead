@@ -16,11 +16,11 @@
 //
 // [opp]: http://en.wikipedia.org/wiki/Operator-precedence_parser
 
-import {types as tt} from "./tokentype"
-import {Parser} from "./state"
-import {DestructuringErrors} from "./parseutil"
-import {lineBreak} from "./whitespace"
-import {functionFlags, SCOPE_ARROW, SCOPE_SUPER, SCOPE_DIRECT_SUPER, BIND_OUTSIDE, BIND_VAR} from "./scopeflags"
+import {types as tt} from "./tokentype.js"
+import {Parser} from "./state.js"
+import {DestructuringErrors} from "./parseutil.js"
+import {lineBreak} from "./whitespace.js"
+import {functionFlags, SCOPE_ARROW, SCOPE_SUPER, SCOPE_DIRECT_SUPER, BIND_OUTSIDE, BIND_VAR} from "./scopeflags.js"
 
 const pp = Parser.prototype
 
@@ -44,9 +44,11 @@ pp.checkPropClash = function(prop, propHash, refDestructuringErrors) {
   if (this.options.ecmaVersion >= 6) {
     if (name === "__proto__" && kind === "init") {
       if (propHash.proto) {
-        if (refDestructuringErrors && refDestructuringErrors.doubleProto < 0) refDestructuringErrors.doubleProto = key.start
-        // Backwards-compat kludge. Can be removed in version 6.0
-        else this.raiseRecoverable(key.start, "Redefinition of __proto__ property")
+        if (refDestructuringErrors) {
+          if (refDestructuringErrors.doubleProto < 0)
+            refDestructuringErrors.doubleProto = key.start
+          // Backwards-compat kludge. Can be removed in version 6.0
+        } else this.raiseRecoverable(key.start, "Redefinition of __proto__ property")
       }
       propHash.proto = true
     }
@@ -111,12 +113,11 @@ pp.parseMaybeAssign = function(noIn, refDestructuringErrors, afterLeftParse) {
     else this.exprAllowed = false
   }
 
-  let ownDestructuringErrors = false, oldParenAssign = -1, oldTrailingComma = -1, oldShorthandAssign = -1
+  let ownDestructuringErrors = false, oldParenAssign = -1, oldTrailingComma = -1
   if (refDestructuringErrors) {
     oldParenAssign = refDestructuringErrors.parenthesizedAssign
     oldTrailingComma = refDestructuringErrors.trailingComma
-    oldShorthandAssign = refDestructuringErrors.shorthandAssign
-    refDestructuringErrors.parenthesizedAssign = refDestructuringErrors.trailingComma = refDestructuringErrors.shorthandAssign = -1
+    refDestructuringErrors.parenthesizedAssign = refDestructuringErrors.trailingComma = -1
   } else {
     refDestructuringErrors = new DestructuringErrors
     ownDestructuringErrors = true
@@ -130,10 +131,18 @@ pp.parseMaybeAssign = function(noIn, refDestructuringErrors, afterLeftParse) {
   if (this.type.isAssign) {
     let node = this.startNodeAt(startPos, startLoc)
     node.operator = this.value
-    node.left = this.type === tt.eq ? this.toAssignable(left, false, refDestructuringErrors) : left
-    if (!ownDestructuringErrors) DestructuringErrors.call(refDestructuringErrors)
-    refDestructuringErrors.shorthandAssign = -1 // reset because shorthand default was used correctly
-    this.checkLVal(left)
+    if (this.type === tt.eq)
+      left = this.toAssignable(left, false, refDestructuringErrors)
+    if (!ownDestructuringErrors) {
+      refDestructuringErrors.parenthesizedAssign = refDestructuringErrors.trailingComma = refDestructuringErrors.doubleProto = -1
+    }
+    if (refDestructuringErrors.shorthandAssign >= left.start)
+      refDestructuringErrors.shorthandAssign = -1 // reset because shorthand default was used correctly
+    if (this.type === tt.eq)
+      this.checkLValPattern(left)
+    else
+      this.checkLValSimple(left)
+    node.left = left
     this.next()
     node.right = this.parseMaybeAssign(noIn)
     return this.finishNode(node, "AssignmentExpression")
@@ -142,7 +151,6 @@ pp.parseMaybeAssign = function(noIn, refDestructuringErrors, afterLeftParse) {
   }
   if (oldParenAssign > -1) refDestructuringErrors.parenthesizedAssign = oldParenAssign
   if (oldTrailingComma > -1) refDestructuringErrors.trailingComma = oldTrailingComma
-  if (oldShorthandAssign > -1) refDestructuringErrors.shorthandAssign = oldShorthandAssign
   return left
 }
 
@@ -183,11 +191,20 @@ pp.parseExprOp = function(left, leftStartPos, leftStartLoc, minPrec, noIn) {
   if (prec != null && (!noIn || this.type !== tt._in)) {
     if (prec > minPrec) {
       let logical = this.type === tt.logicalOR || this.type === tt.logicalAND
+      let coalesce = this.type === tt.coalesce
+      if (coalesce) {
+        // Handle the precedence of `tt.coalesce` as equal to the range of logical expressions.
+        // In other words, `node.right` shouldn't contain logical expressions in order to check the mixed error.
+        prec = tt.logicalAND.binop
+      }
       let op = this.value
       this.next()
       let startPos = this.start, startLoc = this.startLoc
       let right = this.parseExprOp(this.parseMaybeUnary(null, false), startPos, startLoc, prec, noIn)
-      let node = this.buildBinary(leftStartPos, leftStartLoc, left, right, op, logical)
+      let node = this.buildBinary(leftStartPos, leftStartLoc, left, right, op, logical || coalesce)
+      if ((logical && this.type === tt.coalesce) || (coalesce && (this.type === tt.logicalOR || this.type === tt.logicalAND))) {
+        this.raiseRecoverable(this.start, "Logical expressions and coalesce expressions cannot be mixed. Wrap either by parentheses")
+      }
       return this.parseExprOp(node, leftStartPos, leftStartLoc, minPrec, noIn)
     }
   }
@@ -216,7 +233,7 @@ pp.parseMaybeUnary = function(refDestructuringErrors, sawUnary) {
     this.next()
     node.argument = this.parseMaybeUnary(null, true)
     this.checkExpressionErrors(refDestructuringErrors, true)
-    if (update) this.checkLVal(node.argument)
+    if (update) this.checkLValSimple(node.argument)
     else if (this.strict && node.operator === "delete" &&
              node.argument.type === "Identifier")
       this.raiseRecoverable(node.start, "Deleting local variable in strict mode")
@@ -230,7 +247,7 @@ pp.parseMaybeUnary = function(refDestructuringErrors, sawUnary) {
       node.operator = this.value
       node.prefix = false
       node.argument = expr
-      this.checkLVal(expr)
+      this.checkLValSimple(expr)
       this.next()
       expr = this.finishNode(node, "UpdateExpression")
     }
@@ -247,42 +264,63 @@ pp.parseMaybeUnary = function(refDestructuringErrors, sawUnary) {
 pp.parseExprSubscripts = function(refDestructuringErrors) {
   let startPos = this.start, startLoc = this.startLoc
   let expr = this.parseExprAtom(refDestructuringErrors)
-  let skipArrowSubscripts = expr.type === "ArrowFunctionExpression" && this.input.slice(this.lastTokStart, this.lastTokEnd) !== ")"
-  if (this.checkExpressionErrors(refDestructuringErrors) || skipArrowSubscripts) return expr
+  if (expr.type === "ArrowFunctionExpression" && this.input.slice(this.lastTokStart, this.lastTokEnd) !== ")")
+    return expr
   let result = this.parseSubscripts(expr, startPos, startLoc)
   if (refDestructuringErrors && result.type === "MemberExpression") {
     if (refDestructuringErrors.parenthesizedAssign >= result.start) refDestructuringErrors.parenthesizedAssign = -1
     if (refDestructuringErrors.parenthesizedBind >= result.start) refDestructuringErrors.parenthesizedBind = -1
+    if (refDestructuringErrors.trailingComma >= result.start) refDestructuringErrors.trailingComma = -1
   }
   return result
 }
 
 pp.parseSubscripts = function(base, startPos, startLoc, noCalls) {
   let maybeAsyncArrow = this.options.ecmaVersion >= 8 && base.type === "Identifier" && base.name === "async" &&
-      this.lastTokEnd === base.end && !this.canInsertSemicolon() && this.input.slice(base.start, base.end) === "async"
+      this.lastTokEnd === base.end && !this.canInsertSemicolon() && base.end - base.start === 5 &&
+      this.potentialArrowAt === base.start
+  let optionalChained = false
+
   while (true) {
-    let element = this.parseSubscript(base, startPos, startLoc, noCalls, maybeAsyncArrow)
-    if (element === base || element.type === "ArrowFunctionExpression") return element
+    let element = this.parseSubscript(base, startPos, startLoc, noCalls, maybeAsyncArrow, optionalChained)
+
+    if (element.optional) optionalChained = true
+    if (element === base || element.type === "ArrowFunctionExpression") {
+      if (optionalChained) {
+        const chainNode = this.startNodeAt(startPos, startLoc)
+        chainNode.expression = element
+        element = this.finishNode(chainNode, "ChainExpression")
+      }
+      return element
+    }
+
     base = element
   }
 }
 
-pp.parseSubscript = function(base, startPos, startLoc, noCalls, maybeAsyncArrow) {
+pp.parseSubscript = function(base, startPos, startLoc, noCalls, maybeAsyncArrow, optionalChained) {
+  let optionalSupported = this.options.ecmaVersion >= 11
+  let optional = optionalSupported && this.eat(tt.questionDot)
+  if (noCalls && optional) this.raise(this.lastTokStart, "Optional chaining cannot appear in the callee of new expressions")
+
   let computed = this.eat(tt.bracketL)
-  if (computed || this.eat(tt.dot)) {
+  if (computed || (optional && this.type !== tt.parenL && this.type !== tt.backQuote) || this.eat(tt.dot)) {
     let node = this.startNodeAt(startPos, startLoc)
     node.object = base
-    node.property = computed ? this.parseExpression() : this.parseIdent(true)
+    node.property = computed ? this.parseExpression() : this.parseIdent(this.options.allowReserved !== "never")
     node.computed = !!computed
     if (computed) this.expect(tt.bracketR)
+    if (optionalSupported) {
+      node.optional = optional
+    }
     base = this.finishNode(node, "MemberExpression")
   } else if (!noCalls && this.eat(tt.parenL)) {
     let refDestructuringErrors = new DestructuringErrors, oldYieldPos = this.yieldPos, oldAwaitPos = this.awaitPos, oldAwaitIdentPos = this.awaitIdentPos
     this.yieldPos = 0
     this.awaitPos = 0
     this.awaitIdentPos = 0
-    let exprList = this.parseExprList(tt.parenR, this.options.ecmaVersion >= 8 && base.type !== "Import", false, refDestructuringErrors)
-    if (maybeAsyncArrow && !this.canInsertSemicolon() && this.eat(tt.arrow)) {
+    let exprList = this.parseExprList(tt.parenR, this.options.ecmaVersion >= 8, false, refDestructuringErrors)
+    if (maybeAsyncArrow && !optional && !this.canInsertSemicolon() && this.eat(tt.arrow)) {
       this.checkPatternErrors(refDestructuringErrors, false)
       this.checkYieldAwaitInDefaultParams()
       if (this.awaitIdentPos > 0)
@@ -299,18 +337,14 @@ pp.parseSubscript = function(base, startPos, startLoc, noCalls, maybeAsyncArrow)
     let node = this.startNodeAt(startPos, startLoc)
     node.callee = base
     node.arguments = exprList
-    if (node.callee.type === "Import") {
-      if (node.arguments.length !== 1) {
-        this.raise(node.start, "import() requires exactly one argument")
-      }
-
-      const importArg = node.arguments[0]
-      if (importArg && importArg.type === "SpreadElement") {
-        this.raise(importArg.start, "... is not allowed in import()")
-      }
+    if (optionalSupported) {
+      node.optional = optional
     }
     base = this.finishNode(node, "CallExpression")
   } else if (this.type === tt.backQuote) {
+    if (optional || optionalChained) {
+      this.raise(this.start, "Optional chaining cannot appear in the tag of tagged template expressions")
+    }
     let node = this.startNodeAt(startPos, startLoc)
     node.tag = base
     node.quasi = this.parseTemplate({isTagged: true})
@@ -343,7 +377,7 @@ pp.parseExprAtom = function(refDestructuringErrors) {
     //     super [ Expression ]
     //     super . IdentifierName
     // SuperCall:
-    //     super Arguments
+    //     super ( Arguments )
     if (this.type !== tt.dot && this.type !== tt.bracketL && this.type !== tt.parenL)
       this.unexpected()
     return this.finishNode(node, "Super")
@@ -420,8 +454,8 @@ pp.parseExprAtom = function(refDestructuringErrors) {
     return this.parseTemplate()
 
   case tt._import:
-    if (this.options.ecmaVersion > 10) {
-      return this.parseDynamicImport()
+    if (this.options.ecmaVersion >= 11) {
+      return this.parseExprImport()
     } else {
       return this.unexpected()
     }
@@ -431,20 +465,65 @@ pp.parseExprAtom = function(refDestructuringErrors) {
   }
 }
 
-pp.parseDynamicImport = function() {
+pp.parseExprImport = function() {
   const node = this.startNode()
-  this.next()
-  if (this.type !== tt.parenL) {
+
+  // Consume `import` as an identifier for `import.meta`.
+  // Because `this.parseIdent(true)` doesn't check escape sequences, it needs the check of `this.containsEsc`.
+  if (this.containsEsc) this.raiseRecoverable(this.start, "Escape sequence in keyword import")
+  const meta = this.parseIdent(true)
+
+  switch (this.type) {
+  case tt.parenL:
+    return this.parseDynamicImport(node)
+  case tt.dot:
+    node.meta = meta
+    return this.parseImportMeta(node)
+  default:
     this.unexpected()
   }
-  return this.finishNode(node, "Import")
+}
+
+pp.parseDynamicImport = function(node) {
+  this.next() // skip `(`
+
+  // Parse node.source.
+  node.source = this.parseMaybeAssign()
+
+  // Verify ending.
+  if (!this.eat(tt.parenR)) {
+    const errorPos = this.start
+    if (this.eat(tt.comma) && this.eat(tt.parenR)) {
+      this.raiseRecoverable(errorPos, "Trailing comma is not allowed in import()")
+    } else {
+      this.unexpected(errorPos)
+    }
+  }
+
+  return this.finishNode(node, "ImportExpression")
+}
+
+pp.parseImportMeta = function(node) {
+  this.next() // skip `.`
+
+  const containsEsc = this.containsEsc
+  node.property = this.parseIdent(true)
+
+  if (node.property.name !== "meta")
+    this.raiseRecoverable(node.property.start, "The only valid meta property for import is 'import.meta'")
+  if (containsEsc)
+    this.raiseRecoverable(node.start, "'import.meta' must not contain escaped characters")
+  if (this.options.sourceType !== "module" && !this.options.allowImportExportEverywhere)
+    this.raiseRecoverable(node.start, "Cannot use 'import.meta' outside a module")
+
+  return this.finishNode(node, "MetaProperty")
 }
 
 pp.parseLiteral = function(value) {
   let node = this.startNode()
   node.value = value
   node.raw = this.input.slice(this.start, this.end)
-  if (node.raw.charCodeAt(node.raw.length - 1) === 110) node.bigint = node.raw.slice(0, -1)
+  if (node.raw.charCodeAt(node.raw.length - 1) === 110) node.bigint = node.raw.slice(0, -1).replace(/_/g, "")
   this.next()
   return this.finishNode(node, "Literal")
 }
@@ -535,24 +614,27 @@ pp.parseParenArrowList = function(startPos, startLoc, exprList) {
 const empty = []
 
 pp.parseNew = function() {
+  if (this.containsEsc) this.raiseRecoverable(this.start, "Escape sequence in keyword new")
   let node = this.startNode()
   let meta = this.parseIdent(true)
   if (this.options.ecmaVersion >= 6 && this.eat(tt.dot)) {
     node.meta = meta
     let containsEsc = this.containsEsc
     node.property = this.parseIdent(true)
-    if (node.property.name !== "target" || containsEsc)
-      this.raiseRecoverable(node.property.start, "The only valid meta property for new is new.target")
-    if (!this.inNonArrowFunction())
-      this.raiseRecoverable(node.start, "new.target can only be used in functions")
+    if (node.property.name !== "target")
+      this.raiseRecoverable(node.property.start, "The only valid meta property for new is 'new.target'")
+    if (containsEsc)
+      this.raiseRecoverable(node.start, "'new.target' must not contain escaped characters")
+    if (!this.inNonArrowFunction)
+      this.raiseRecoverable(node.start, "'new.target' can only be used in functions")
     return this.finishNode(node, "MetaProperty")
   }
-  let startPos = this.start, startLoc = this.startLoc
+  let startPos = this.start, startLoc = this.startLoc, isImport = this.type === tt._import
   node.callee = this.parseSubscripts(this.parseExprAtom(), startPos, startLoc, true)
-  if (this.options.ecmaVersion > 10 && node.callee.type === "Import") {
-    this.raise(node.callee.start, "Cannot use new with import(...)")
+  if (isImport && node.callee.type === "ImportExpression") {
+    this.raise(startPos, "Cannot use new with import()")
   }
-  if (this.eat(tt.parenL)) node.arguments = this.parseExprList(tt.parenR, this.options.ecmaVersion >= 8 && node.callee.type !== "Import", false)
+  if (this.eat(tt.parenL)) node.arguments = this.parseExprList(tt.parenR, this.options.ecmaVersion >= 8, false)
   else node.arguments = empty
   return this.finishNode(node, "NewExpression")
 }
@@ -612,7 +694,7 @@ pp.parseObj = function(isPattern, refDestructuringErrors) {
   while (!this.eat(tt.braceR)) {
     if (!first) {
       this.expect(tt.comma)
-      if (this.afterTrailingComma(tt.braceR)) break
+      if (this.options.ecmaVersion >= 5 && this.afterTrailingComma(tt.braceR)) break
     } else first = false
 
     const prop = this.parseProperty(isPattern, refDestructuringErrors)
@@ -688,7 +770,7 @@ pp.parsePropertyValue = function(prop, isPattern, isGenerator, isAsync, startPos
   } else if (!isPattern && !containsEsc &&
              this.options.ecmaVersion >= 5 && !prop.computed && prop.key.type === "Identifier" &&
              (prop.key.name === "get" || prop.key.name === "set") &&
-             (this.type !== tt.comma && this.type !== tt.braceR)) {
+             (this.type !== tt.comma && this.type !== tt.braceR && this.type !== tt.eq)) {
     if (isGenerator || isAsync) this.unexpected()
     prop.kind = prop.key.name
     this.parsePropertyName(prop)
@@ -711,13 +793,13 @@ pp.parsePropertyValue = function(prop, isPattern, isGenerator, isAsync, startPos
       this.awaitIdentPos = startPos
     prop.kind = "init"
     if (isPattern) {
-      prop.value = this.parseMaybeDefault(startPos, startLoc, prop.key)
+      prop.value = this.parseMaybeDefault(startPos, startLoc, this.copyNode(prop.key))
     } else if (this.type === tt.eq && refDestructuringErrors) {
       if (refDestructuringErrors.shorthandAssign < 0)
         refDestructuringErrors.shorthandAssign = this.start
-      prop.value = this.parseMaybeDefault(startPos, startLoc, prop.key)
+      prop.value = this.parseMaybeDefault(startPos, startLoc, this.copyNode(prop.key))
     } else {
-      prop.value = prop.key
+      prop.value = this.copyNode(prop.key)
     }
     prop.shorthand = true
   } else this.unexpected()
@@ -734,7 +816,7 @@ pp.parsePropertyName = function(prop) {
       prop.computed = false
     }
   }
-  return prop.key = this.type === tt.num || this.type === tt.string ? this.parseExprAtom() : this.parseIdent(true)
+  return prop.key = this.type === tt.num || this.type === tt.string ? this.parseExprAtom() : this.parseIdent(this.options.allowReserved !== "never")
 }
 
 // Initialize empty function node.
@@ -823,16 +905,14 @@ pp.parseFunctionBody = function(node, isArrowFunction, isMethod) {
     // Add the params to varDeclaredNames to ensure that an error is thrown
     // if a let/const declaration in the function clashes with one of the params.
     this.checkParams(node, !oldStrict && !useStrict && !isArrowFunction && !isMethod && this.isSimpleParamList(node.params))
-    node.body = this.parseBlock(false)
+    // Ensure the function name isn't a forbidden identifier in strict mode, e.g. 'eval'
+    if (this.strict && node.id) this.checkLValSimple(node.id, BIND_OUTSIDE)
+    node.body = this.parseBlock(false, undefined, useStrict && !oldStrict)
     node.expression = false
     this.adaptDirectivePrologue(node.body.body)
     this.labels = oldLabels
   }
   this.exitScope()
-
-  // Ensure the function name isn't a forbidden identifier in strict mode, e.g. 'eval'
-  if (this.strict && node.id) this.checkLVal(node.id, BIND_OUTSIDE)
-  this.strict = oldStrict
 }
 
 pp.isSimpleParamList = function(params) {
@@ -845,9 +925,9 @@ pp.isSimpleParamList = function(params) {
 // or "arguments" and duplicate parameters.
 
 pp.checkParams = function(node, allowDuplicates) {
-  let nameHash = {}
+  let nameHash = Object.create(null)
   for (let param of node.params)
-    this.checkLVal(param, BIND_VAR, allowDuplicates ? null : nameHash)
+    this.checkLValInnerPattern(param, BIND_VAR, allowDuplicates ? null : nameHash)
 }
 
 // Parses a comma-separated list of expressions, and returns them as
@@ -902,7 +982,6 @@ pp.checkUnreserved = function({start, end, name}) {
 
 pp.parseIdent = function(liberal, isBinding) {
   let node = this.startNode()
-  if (liberal && this.options.allowReserved === "never") liberal = false
   if (this.type === tt.name) {
     node.name = this.value
   } else if (this.type.keyword) {
@@ -919,7 +998,7 @@ pp.parseIdent = function(liberal, isBinding) {
   } else {
     this.unexpected()
   }
-  this.next()
+  this.next(!!liberal)
   this.finishNode(node, "Identifier")
   if (!liberal) {
     this.checkUnreserved(node)
