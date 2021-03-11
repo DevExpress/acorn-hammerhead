@@ -1,19 +1,18 @@
-import {reservedWords, keywords} from "./identifier"
-import {types as tt} from "./tokentype"
-import {lineBreak} from "./whitespace"
-import {getOptions} from "./options"
-import {wordsRegexp} from "./util"
-import {SCOPE_TOP, SCOPE_FUNCTION, SCOPE_ASYNC, SCOPE_GENERATOR, SCOPE_SUPER, SCOPE_DIRECT_SUPER} from "./scopeflags"
+import {reservedWords, keywords} from "./identifier.js"
+import {types as tt} from "./tokentype.js"
+import {lineBreak} from "./whitespace.js"
+import {getOptions} from "./options.js"
+import {wordsRegexp} from "./util.js"
+import {SCOPE_TOP, SCOPE_FUNCTION, SCOPE_ASYNC, SCOPE_GENERATOR, SCOPE_SUPER, SCOPE_DIRECT_SUPER} from "./scopeflags.js"
 
 export class Parser {
   constructor(options, input, startPos) {
     this.options = options = getOptions(options)
     this.sourceFile = options.sourceFile
-    this.keywords = wordsRegexp(keywords[options.ecmaVersion >= 6 ? 6 : 5])
+    this.keywords = wordsRegexp(keywords[options.ecmaVersion >= 6 ? 6 : options.sourceType === "module" ? "5module" : 5])
     let reserved = ""
     if (options.allowReserved !== true) {
-      for (let v = options.ecmaVersion;; v--)
-        if (reserved = reservedWords[v]) break
+      reserved = reservedWords[options.ecmaVersion >= 6 ? 6 : options.ecmaVersion === 5 ? 5 : 3]
       if (options.sourceType === "module") reserved += " await"
     }
     this.reservedWords = wordsRegexp(reserved)
@@ -72,7 +71,7 @@ export class Parser {
     // Labels in scope.
     this.labels = []
     // Thus-far undefined exports.
-    this.undefinedExports = {}
+    this.undefinedExports = Object.create(null)
 
     // If enabled, skip leading hashbang line.
     if (this.pos === 0 && options.allowHashBang && this.input.slice(0, 2) === "#!")
@@ -98,9 +97,7 @@ export class Parser {
   get allowSuper() { return (this.currentThisScope().flags & SCOPE_SUPER) > 0 }
   get allowDirectSuper() { return (this.currentThisScope().flags & SCOPE_DIRECT_SUPER) > 0 }
   get treatFunctionsAsVar() { return this.treatFunctionsAsVarInScope(this.currentScope()) }
-
-  // Switch to a getter for 7.0.0.
-  inNonArrowFunction() { return (this.currentThisScope().flags & SCOPE_FUNCTION) > 0 }
+  get inNonArrowFunction() { return (this.currentThisScope().flags & SCOPE_FUNCTION) > 0 }
 
   static extend(...plugins) {
     let cls = this

@@ -1,9 +1,9 @@
-import {isIdentifierStart, isIdentifierChar} from "./identifier"
-import {types as tt, keywords as keywordTypes} from "./tokentype"
-import {Parser} from "./state"
-import {SourceLocation} from "./locutil"
-import {RegExpValidationState} from "./regexp"
-import {lineBreak, lineBreakG, isNewLine, nonASCIIwhitespace} from "./whitespace"
+import {isIdentifierStart, isIdentifierChar} from "./identifier.js"
+import {types as tt, keywords as keywordTypes} from "./tokentype.js"
+import {Parser} from "./state.js"
+import {SourceLocation} from "./locutil.js"
+import {RegExpValidationState} from "./regexp.js"
+import {lineBreak, lineBreakG, isNewLine, nonASCIIwhitespace} from "./whitespace.js"
 
 // Object type used to represent tokens. Note that normally, tokens
 // simply exist as properties on the parser object. This is only
@@ -28,7 +28,9 @@ const pp = Parser.prototype
 
 // Move to the next token
 
-pp.next = function() {
+pp.next = function(ignoreEscapeSequenceInKeyword) {
+  if (!ignoreEscapeSequenceInKeyword && this.type.keyword && this.containsEsc)
+    this.raiseRecoverable(this.start, "Escape sequence in keyword " + this.type.keyword)
   if (this.options.onToken)
     this.options.onToken(new Token(this))
 
@@ -231,7 +233,13 @@ pp.readToken_mult_modulo_exp = function(code) { // '%*'
 
 pp.readToken_pipe_amp = function(code) { // '|&'
   let next = this.input.charCodeAt(this.pos + 1)
-  if (next === code) return this.finishOp(code === 124 ? tt.logicalOR : tt.logicalAND, 2)
+  if (next === code) {
+    if (this.options.ecmaVersion >= 12) {
+      let next2 = this.input.charCodeAt(this.pos + 2)
+      if (next2 === 61) return this.finishOp(tt.assign, 3)
+    }
+    return this.finishOp(code === 124 ? tt.logicalOR : tt.logicalAND, 2)
+  }
   if (next === 61) return this.finishOp(tt.assign, 2)
   return this.finishOp(code === 124 ? tt.bitwiseOR : tt.bitwiseAND, 1)
 }
@@ -287,6 +295,25 @@ pp.readToken_eq_excl = function(code) { // '=!'
   return this.finishOp(code === 61 ? tt.eq : tt.prefix, 1)
 }
 
+pp.readToken_question = function() { // '?'
+  const ecmaVersion = this.options.ecmaVersion
+  if (ecmaVersion >= 11) {
+    let next = this.input.charCodeAt(this.pos + 1)
+    if (next === 46) {
+      let next2 = this.input.charCodeAt(this.pos + 2)
+      if (next2 < 48 || next2 > 57) return this.finishOp(tt.questionDot, 2)
+    }
+    if (next === 63) {
+      if (ecmaVersion >= 12) {
+        let next2 = this.input.charCodeAt(this.pos + 2)
+        if (next2 === 61) return this.finishOp(tt.assign, 3)
+      }
+      return this.finishOp(tt.coalesce, 2)
+    }
+  }
+  return this.finishOp(tt.question, 1)
+}
+
 pp.getTokenFromCode = function(code) {
   switch (code) {
   // The interpretation of a dot depends on whether it is followed
@@ -304,7 +331,6 @@ pp.getTokenFromCode = function(code) {
   case 123: ++this.pos; return this.finishToken(tt.braceL)
   case 125: ++this.pos; return this.finishToken(tt.braceR)
   case 58: ++this.pos; return this.finishToken(tt.colon)
-  case 63: ++this.pos; return this.finishToken(tt.question)
 
   case 96: // '`'
     if (this.options.ecmaVersion < 6) break
@@ -353,6 +379,9 @@ pp.getTokenFromCode = function(code) {
 
   case 61: case 33: // '=!'
     return this.readToken_eq_excl(code)
+
+  case 63: // '?'
+    return this.readToken_question()
 
   case 126: // '~'
     return this.finishOp(tt.prefix, 1)
@@ -409,21 +438,58 @@ pp.readRegexp = function() {
 // were read, the integer value otherwise. When `len` is given, this
 // will return `null` unless the integer has exactly `len` digits.
 
-pp.readInt = function(radix, len) {
-  let start = this.pos, total = 0
-  for (let i = 0, e = len == null ? Infinity : len; i < e; ++i) {
+pp.readInt = function(radix, len, maybeLegacyOctalNumericLiteral) {
+  // `len` is used for character escape sequences. In that case, disallow separators.
+  const allowSeparators = this.options.ecmaVersion >= 12 && len === undefined
+
+  // `maybeLegacyOctalNumericLiteral` is true if it doesn't have prefix (0x,0o,0b)
+  // and isn't fraction part nor exponent part. In that case, if the first digit
+  // is zero then disallow separators.
+  const isLegacyOctalNumericLiteral = maybeLegacyOctalNumericLiteral && this.input.charCodeAt(this.pos) === 48
+
+  let start = this.pos, total = 0, lastCode = 0
+  for (let i = 0, e = len == null ? Infinity : len; i < e; ++i, ++this.pos) {
     let code = this.input.charCodeAt(this.pos), val
+
+    if (allowSeparators && code === 95) {
+      if (isLegacyOctalNumericLiteral) this.raiseRecoverable(this.pos, "Numeric separator is not allowed in legacy octal numeric literals")
+      if (lastCode === 95) this.raiseRecoverable(this.pos, "Numeric separator must be exactly one underscore")
+      if (i === 0) this.raiseRecoverable(this.pos, "Numeric separator is not allowed at the first of digits")
+      lastCode = code
+      continue
+    }
+
     if (code >= 97) val = code - 97 + 10 // a
     else if (code >= 65) val = code - 65 + 10 // A
     else if (code >= 48 && code <= 57) val = code - 48 // 0-9
     else val = Infinity
     if (val >= radix) break
-    ++this.pos
+    lastCode = code
     total = total * radix + val
   }
+
+  if (allowSeparators && lastCode === 95) this.raiseRecoverable(this.pos - 1, "Numeric separator is not allowed at the last of digits")
   if (this.pos === start || len != null && this.pos - start !== len) return null
 
   return total
+}
+
+function stringToNumber(str, isLegacyOctalNumericLiteral) {
+  if (isLegacyOctalNumericLiteral) {
+    return parseInt(str, 8)
+  }
+
+  // `parseFloat(value)` stops parsing at the first numeric separator then returns a wrong value.
+  return parseFloat(str.replace(/_/g, ""))
+}
+
+function stringToBigInt(str) {
+  if (typeof BigInt !== "function") {
+    return null
+  }
+
+  // `BigInt(value)` throws syntax error if the string contains numeric separators.
+  return BigInt(str.replace(/_/g, ""))
 }
 
 pp.readRadixNumber = function(radix) {
@@ -432,7 +498,7 @@ pp.readRadixNumber = function(radix) {
   let val = this.readInt(radix)
   if (val == null) this.raise(this.start + 2, "Expected number in radix " + radix)
   if (this.options.ecmaVersion >= 11 && this.input.charCodeAt(this.pos) === 110) {
-    val = typeof BigInt !== "undefined" ? BigInt(this.input.slice(start, this.pos)) : null
+    val = stringToBigInt(this.input.slice(start, this.pos))
     ++this.pos
   } else if (isIdentifierStart(this.fullCharCodeAtPos())) this.raise(this.pos, "Identifier directly after number")
   return this.finishToken(tt.num, val)
@@ -442,18 +508,17 @@ pp.readRadixNumber = function(radix) {
 
 pp.readNumber = function(startsWithDot) {
   let start = this.pos
-  if (!startsWithDot && this.readInt(10) === null) this.raise(start, "Invalid number")
+  if (!startsWithDot && this.readInt(10, undefined, true) === null) this.raise(start, "Invalid number")
   let octal = this.pos - start >= 2 && this.input.charCodeAt(start) === 48
   if (octal && this.strict) this.raise(start, "Invalid number")
-  if (octal && /[89]/.test(this.input.slice(start, this.pos))) octal = false
   let next = this.input.charCodeAt(this.pos)
   if (!octal && !startsWithDot && this.options.ecmaVersion >= 11 && next === 110) {
-    let str = this.input.slice(start, this.pos)
-    let val = typeof BigInt !== "undefined" ? BigInt(str) : null
+    let val = stringToBigInt(this.input.slice(start, this.pos))
     ++this.pos
     if (isIdentifierStart(this.fullCharCodeAtPos())) this.raise(this.pos, "Identifier directly after number")
     return this.finishToken(tt.num, val)
   }
+  if (octal && /[89]/.test(this.input.slice(start, this.pos))) octal = false
   if (next === 46 && !octal) { // '.'
     ++this.pos
     this.readInt(10)
@@ -466,8 +531,7 @@ pp.readNumber = function(startsWithDot) {
   }
   if (isIdentifierStart(this.fullCharCodeAtPos())) this.raise(this.pos, "Identifier directly after number")
 
-  let str = this.input.slice(start, this.pos)
-  let val = octal ? parseInt(str, 8) : parseFloat(str)
+  let val = stringToNumber(this.input.slice(start, this.pos), octal)
   return this.finishToken(tt.num, val)
 }
 
@@ -628,6 +692,24 @@ pp.readEscapedChar = function(inTemplate) {
   case 10: // ' \n'
     if (this.options.locations) { this.lineStart = this.pos; ++this.curLine }
     return ""
+  case 56:
+  case 57:
+    if (this.strict) {
+      this.invalidStringToken(
+        this.pos - 1,
+        "Invalid escape sequence"
+      )
+    }
+    if (inTemplate) {
+      const codePos = this.pos - 1
+
+      this.invalidStringToken(
+        codePos,
+        "Invalid escape sequence in template string"
+      )
+
+      return null
+    }
   default:
     if (ch >= 48 && ch <= 55) {
       let octalStr = this.input.substr(this.pos - 1, 3).match(/^[0-7]+/)[0]
@@ -707,7 +789,6 @@ pp.readWord = function() {
   let word = this.readWord1()
   let type = tt.name
   if (this.keywords.test(word)) {
-    if (this.containsEsc) this.raiseRecoverable(this.start, "Escape sequence in keyword " + word)
     type = keywordTypes[word]
   }
   return this.finishToken(type, word)

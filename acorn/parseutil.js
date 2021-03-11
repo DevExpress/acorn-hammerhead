@@ -1,12 +1,12 @@
-import {types as tt} from "./tokentype"
-import {Parser} from "./state"
-import {lineBreak, skipWhiteSpace} from "./whitespace"
+import {types as tt} from "./tokentype.js"
+import {Parser} from "./state.js"
+import {lineBreak, skipWhiteSpace} from "./whitespace.js"
 
 const pp = Parser.prototype
 
 // ## Parser utilities
 
-const literal = /^(?:'((?:\\.|[^'])*?)'|"((?:\\.|[^"])*?)")/
+const literal = /^(?:'((?:\\.|[^'\\])*?)'|"((?:\\.|[^"\\])*?)")/
 pp.strictDirective = function(start) {
   for (;;) {
     // Try to find string literal.
@@ -14,7 +14,7 @@ pp.strictDirective = function(start) {
     start += skipWhiteSpace.exec(this.input)[0].length
     let match = literal.exec(this.input.slice(start))
     if (!match) return false
-    if ((match[1] || match[2]) === "use strict") return false
+    if ((match[1] || match[2]) === "use strict") return false;
     start += match[0].length
 
     // Skip semicolon, if any.
