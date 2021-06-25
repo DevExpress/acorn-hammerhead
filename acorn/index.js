@@ -30,6 +30,7 @@ import {TokContext, types as tokContexts} from "./tokencontext.js"
 import {isIdentifierChar, isIdentifierStart} from "./identifier.js"
 import {Token} from "./tokenize.js"
 import {isNewLine, lineBreak, lineBreakG, nonASCIIwhitespace} from "./whitespace.js"
+import * as utils from "./util"
 
 export const version = "8.1.0"
 export {
@@ -100,3 +101,25 @@ export function parseExpressionAt(input, pos, options) {
 export function tokenizer(input, options) {
   return Parser.tokenizer(input, options)
 }
+
+// =============================================================================
+// =============================================================================
+// ===================== TestCafe performance patch ============================
+// =====================||||||||||||||||||||||||||||============================
+// =====================vvvvvvvvvvvvvvvvvvvvvvvvvvvv============================
+
+const storedWordsRegexp = utils.wordsRegexp;
+const wordsRegexpCache  = {};
+
+utils.wordsRegexp = function (words) {
+  if (!wordsRegexpCache[words])
+    wordsRegexpCache[words] = storedWordsRegexp(words);
+
+  return wordsRegexpCache[words];
+}
+
+// =====================^^^^^^^^^^^^^^^^^^^^^^^^^^^^============================
+// =====================||||||||||||||||||||||||||||============================
+// ===================== TestCafe performance patch ============================
+// =============================================================================
+// =============================================================================
