@@ -7,7 +7,7 @@ gulp.task('clean', () => {
 });
 
 gulp.task('transpilation', () => {
-    return gulp.src(['./acorn/*.js'])
+    return gulp.src(['./acorn/**/*.js'])
             .pipe(gulpBabel())
             .pipe(gulp.dest('lib/'));
 });
