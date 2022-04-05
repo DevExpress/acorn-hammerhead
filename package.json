@@ -1,6 +1,6 @@
 {
   "name": "acorn-hammerhead",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "acorn.js parser adapted to TestCafe Hammerhead",
   "license": "MIT",
   "author": {
