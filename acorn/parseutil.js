@@ -14,7 +14,7 @@ pp.strictDirective = function(start) {
     start += skipWhiteSpace.exec(this.input)[0].length
     let match = literal.exec(this.input.slice(start))
     if (!match) return false
-    if ((match[1] || match[2]) === "use strict") return false;
+    if ((match[1] || match[2]) === "use strict") return false
     start += match[0].length
 
     // Skip semicolon, if any.

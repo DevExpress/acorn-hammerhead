@@ -32,7 +32,7 @@ import {Token} from "./tokenize.js"
 import {isNewLine, lineBreak, lineBreakG, nonASCIIwhitespace} from "./whitespace.js"
 import * as utils from "./util"
 
-export const version = "8.1.0"
+export const version = "8.7.0"
 export {
   Parser,
   defaultOptions,
@@ -123,3 +123,4 @@ utils.wordsRegexp = function (words) {
 // ===================== TestCafe performance patch ============================
 // =============================================================================
 // =============================================================================
+

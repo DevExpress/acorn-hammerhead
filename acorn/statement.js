@@ -2,9 +2,9 @@ import {types as tt} from "./tokentype.js"
 import {Parser} from "./state.js"
 import {lineBreak, skipWhiteSpace} from "./whitespace.js"
 import {isIdentifierStart, isIdentifierChar, keywordRelationalOperator} from "./identifier.js"
-import {has} from "./util.js"
+import {hasOwn, loneSurrogate} from "./util.js"
 import {DestructuringErrors} from "./parseutil.js"
-import {functionFlags, SCOPE_SIMPLE_CATCH, BIND_SIMPLE_CATCH, BIND_LEXICAL, BIND_VAR, BIND_FUNCTION} from "./scopeflags.js"
+import {functionFlags, SCOPE_SIMPLE_CATCH, BIND_SIMPLE_CATCH, BIND_LEXICAL, BIND_VAR, BIND_FUNCTION, SCOPE_CLASS_STATIC_BLOCK, SCOPE_SUPER} from "./scopeflags.js"
 
 const pp = Parser.prototype
 
@@ -42,13 +42,14 @@ pp.isLet = function(context) {
   // Statement) is allowed here. If context is not empty then only a Statement
   // is allowed. However, `let [` is an explicit negative lookahead for
   // ExpressionStatement, so special-case it first.
-  if (nextCh === 91) return true // '['
+  if (nextCh === 91 || nextCh === 92 || nextCh > 0xd7ff && nextCh < 0xdc00) return true // '[', '/', astral
   if (context) return false
 
   if (nextCh === 123) return true // '{'
   if (isIdentifierStart(nextCh, true)) {
     let pos = next + 1
-    while (isIdentifierChar(this.input.charCodeAt(pos), true)) ++pos
+    while (isIdentifierChar(nextCh = this.input.charCodeAt(pos), true)) ++pos
+    if (nextCh === 92 || nextCh > 0xd7ff && nextCh < 0xdc00) return true
     let ident = this.input.slice(next, pos)
     if (!keywordRelationalOperator.test(ident)) return true
   }
@@ -64,10 +65,11 @@ pp.isAsyncFunction = function() {
 
   skipWhiteSpace.lastIndex = this.pos
   let skip = skipWhiteSpace.exec(this.input)
-  let next = this.pos + skip[0].length
+  let next = this.pos + skip[0].length, after
   return !lineBreak.test(this.input.slice(this.pos, next)) &&
     this.input.slice(next, next + 8) === "function" &&
-    (next + 8 === this.input.length || !isIdentifierChar(this.input.charAt(next + 8)))
+    (next + 8 === this.input.length ||
+     !(isIdentifierChar(after = this.input.charCodeAt(next + 8)) || after > 0xd7ff && after < 0xdc00))
 }
 
 // Parse a single statement.
@@ -207,7 +209,7 @@ pp.parseDoStatement = function(node) {
 
 pp.parseForStatement = function(node) {
   this.next()
-  let awaitAt = (this.options.ecmaVersion >= 9 && (this.inAsync || (!this.inFunction && this.options.allowAwaitOutsideFunction)) && this.eatContextual("await")) ? this.lastTokStart : -1
+  let awaitAt = (this.options.ecmaVersion >= 9 && this.canAwait && this.eatContextual("await")) ? this.lastTokStart : -1
   this.labels.push(loopLabel)
   this.enterScope(0)
   this.expect(tt.parenL)
@@ -232,14 +234,16 @@ pp.parseForStatement = function(node) {
     if (awaitAt > -1) this.unexpected(awaitAt)
     return this.parseFor(node, init)
   }
+  let startsWithLet = this.isContextual("let"), isForOf = false
   let refDestructuringErrors = new DestructuringErrors
-  let init = this.parseExpression(true, refDestructuringErrors)
-  if (this.type === tt._in || (this.options.ecmaVersion >= 6 && this.isContextual("of"))) {
+  let init = this.parseExpression(awaitAt > -1 ? "await" : true, refDestructuringErrors)
+  if (this.type === tt._in || (isForOf = this.options.ecmaVersion >= 6 && this.isContextual("of"))) {
     if (this.options.ecmaVersion >= 9) {
       if (this.type === tt._in) {
         if (awaitAt > -1) this.unexpected(awaitAt)
       } else node.await = awaitAt > -1
     }
+    if (startsWithLet && isForOf) this.raise(init.start, "The left-hand side of a for-of loop may not start with 'let'.")
     this.toAssignable(init, false, refDestructuringErrors)
     this.checkLValPattern(init)
     return this.parseForIn(node, init)
@@ -517,7 +521,7 @@ const FUNC_STATEMENT = 1, FUNC_HANGING_STATEMENT = 2, FUNC_NULLABLE_ID = 4
 // `statement & FUNC_STATEMENT`).
 
 // Remove `allowExpressionBody` for 7.0.0, as it is only called with false
-pp.parseFunction = function(node, statement, allowExpressionBody, isAsync) {
+pp.parseFunction = function(node, statement, allowExpressionBody, isAsync, forInit) {
   this.initFunction(node)
   if (this.options.ecmaVersion >= 9 || this.options.ecmaVersion >= 6 && !isAsync) {
     if (this.type === tt.star && (statement & FUNC_HANGING_STATEMENT))
@@ -547,7 +551,7 @@ pp.parseFunction = function(node, statement, allowExpressionBody, isAsync) {
     node.id = this.type === tt.name ? this.parseIdent() : null
 
   this.parseFunctionParams(node)
-  this.parseFunctionBody(node, allowExpressionBody, false)
+  this.parseFunctionBody(node, allowExpressionBody, false, forInit)
 
   this.yieldPos = oldYieldPos
   this.awaitPos = oldAwaitPos
@@ -574,7 +578,8 @@ pp.parseClass = function(node, isStatement) {
 
   this.parseClassId(node, isStatement)
   this.parseClassSuper(node)
-  let classBody = this.startNode()
+  const privateNameMap = this.enterClassBody()
+  const classBody = this.startNode()
   let hadConstructor = false
   classBody.body = []
   this.expect(tt.braceL)
@@ -585,71 +590,174 @@ pp.parseClass = function(node, isStatement) {
       if (element.type === "MethodDefinition" && element.kind === "constructor") {
         if (hadConstructor) this.raise(element.start, "Duplicate constructor in the same class")
         hadConstructor = true
+      } else if (element.key && element.key.type === "PrivateIdentifier" && isPrivateNameConflicted(privateNameMap, element)) {
+        this.raiseRecoverable(element.key.start, `Identifier '#${element.key.name}' has already been declared`)
       }
     }
   }
   this.strict = oldStrict
   this.next()
   node.body = this.finishNode(classBody, "ClassBody")
+  this.exitClassBody()
   return this.finishNode(node, isStatement ? "ClassDeclaration" : "ClassExpression")
 }
 
 pp.parseClassElement = function(constructorAllowsSuper) {
   if (this.eat(tt.semi)) return null
 
-  let method = this.startNode()
-  const tryContextual = (k, noLineBreak = false) => {
-    const start = this.start, startLoc = this.startLoc
-    if (!this.eatContextual(k)) return false
-    if (this.type !== tt.parenL && (!noLineBreak || !this.canInsertSemicolon())) return true
-    if (method.key) this.unexpected()
-    method.computed = false
-    method.key = this.startNodeAt(start, startLoc)
-    method.key.name = k
-    this.finishNode(method.key, "Identifier")
-    return false
-  }
-
-  method.kind = "method"
-  method.static = tryContextual("static")
-  let isGenerator = this.eat(tt.star)
+  const ecmaVersion = this.options.ecmaVersion
+  const node = this.startNode()
+  let keyName = ""
+  let isGenerator = false
   let isAsync = false
-  if (!isGenerator) {
-    if (this.options.ecmaVersion >= 8 && tryContextual("async", true)) {
-      isAsync = true
-      isGenerator = this.options.ecmaVersion >= 9 && this.eat(tt.star)
-    } else if (tryContextual("get")) {
-      method.kind = "get"
-    } else if (tryContextual("set")) {
-      method.kind = "set"
+  let kind = "method"
+  let isStatic = false
+
+  if (this.eatContextual("static")) {
+    // Parse static init block
+    if (ecmaVersion >= 13 && this.eat(tt.braceL)) {
+      this.parseClassStaticBlock(node)
+      return node
+    }
+    if (this.isClassElementNameStart() || this.type === tt.star) {
+      isStatic = true
+    } else {
+      keyName = "static"
     }
   }
-  if (!method.key) this.parsePropertyName(method)
-  let {key} = method
-  let allowsDirectSuper = false
-  if (!method.computed && !method.static && (key.type === "Identifier" && key.name === "constructor" ||
-      key.type === "Literal" && key.value === "constructor")) {
-    if (method.kind !== "method") this.raise(key.start, "Constructor can't have get/set modifier")
-    if (isGenerator) this.raise(key.start, "Constructor can't be a generator")
-    if (isAsync) this.raise(key.start, "Constructor can't be an async method")
-    method.kind = "constructor"
-    allowsDirectSuper = constructorAllowsSuper
-  } else if (method.static && key.type === "Identifier" && key.name === "prototype") {
-    this.raise(key.start, "Classes may not have a static property named prototype")
+  node.static = isStatic
+  if (!keyName && ecmaVersion >= 8 && this.eatContextual("async")) {
+    if ((this.isClassElementNameStart() || this.type === tt.star) && !this.canInsertSemicolon()) {
+      isAsync = true
+    } else {
+      keyName = "async"
+    }
   }
-  this.parseClassMethod(method, isGenerator, isAsync, allowsDirectSuper)
-  if (method.kind === "get" && method.value.params.length !== 0)
-    this.raiseRecoverable(method.value.start, "getter should have no params")
-  if (method.kind === "set" && method.value.params.length !== 1)
-    this.raiseRecoverable(method.value.start, "setter should have exactly one param")
-  if (method.kind === "set" && method.value.params[0].type === "RestElement")
-    this.raiseRecoverable(method.value.params[0].start, "Setter cannot use rest params")
-  return method
+  if (!keyName && (ecmaVersion >= 9 || !isAsync) && this.eat(tt.star)) {
+    isGenerator = true
+  }
+  if (!keyName && !isAsync && !isGenerator) {
+    const lastValue = this.value
+    if (this.eatContextual("get") || this.eatContextual("set")) {
+      if (this.isClassElementNameStart()) {
+        kind = lastValue
+      } else {
+        keyName = lastValue
+      }
+    }
+  }
+
+  // Parse element name
+  if (keyName) {
+    // 'async', 'get', 'set', or 'static' were not a keyword contextually.
+    // The last token is any of those. Make it the element name.
+    node.computed = false
+    node.key = this.startNodeAt(this.lastTokStart, this.lastTokStartLoc)
+    node.key.name = keyName
+    this.finishNode(node.key, "Identifier")
+  } else {
+    this.parseClassElementName(node)
+  }
+
+  // Parse element value
+  if (ecmaVersion < 13 || this.type === tt.parenL || kind !== "method" || isGenerator || isAsync) {
+    const isConstructor = !node.static && checkKeyName(node, "constructor")
+    const allowsDirectSuper = isConstructor && constructorAllowsSuper
+    // Couldn't move this check into the 'parseClassMethod' method for backward compatibility.
+    if (isConstructor && kind !== "method") this.raise(node.key.start, "Constructor can't have get/set modifier")
+    node.kind = isConstructor ? "constructor" : kind
+    this.parseClassMethod(node, isGenerator, isAsync, allowsDirectSuper)
+  } else {
+    this.parseClassField(node)
+  }
+
+  return node
+}
+
+pp.isClassElementNameStart = function() {
+  return (
+    this.type === tt.name ||
+    this.type === tt.privateId ||
+    this.type === tt.num ||
+    this.type === tt.string ||
+    this.type === tt.bracketL ||
+    this.type.keyword
+  )
+}
+
+pp.parseClassElementName = function(element) {
+  if (this.type === tt.privateId) {
+    if (this.value === "constructor") {
+      this.raise(this.start, "Classes can't have an element named '#constructor'")
+    }
+    element.computed = false
+    element.key = this.parsePrivateIdent()
+  } else {
+    this.parsePropertyName(element)
+  }
 }
 
 pp.parseClassMethod = function(method, isGenerator, isAsync, allowsDirectSuper) {
-  method.value = this.parseMethod(isGenerator, isAsync, allowsDirectSuper)
+  // Check key and flags
+  const key = method.key
+  if (method.kind === "constructor") {
+    if (isGenerator) this.raise(key.start, "Constructor can't be a generator")
+    if (isAsync) this.raise(key.start, "Constructor can't be an async method")
+  } else if (method.static && checkKeyName(method, "prototype")) {
+    this.raise(key.start, "Classes may not have a static property named prototype")
+  }
+
+  // Parse value
+  const value = method.value = this.parseMethod(isGenerator, isAsync, allowsDirectSuper)
+
+  // Check value
+  if (method.kind === "get" && value.params.length !== 0)
+    this.raiseRecoverable(value.start, "getter should have no params")
+  if (method.kind === "set" && value.params.length !== 1)
+    this.raiseRecoverable(value.start, "setter should have exactly one param")
+  if (method.kind === "set" && value.params[0].type === "RestElement")
+    this.raiseRecoverable(value.params[0].start, "Setter cannot use rest params")
+
   return this.finishNode(method, "MethodDefinition")
+}
+
+pp.parseClassField = function(field) {
+  if (checkKeyName(field, "constructor")) {
+    this.raise(field.key.start, "Classes can't have a field named 'constructor'")
+  } else if (field.static && checkKeyName(field, "prototype")) {
+    this.raise(field.key.start, "Classes can't have a static field named 'prototype'")
+  }
+
+  if (this.eat(tt.eq)) {
+    // To raise SyntaxError if 'arguments' exists in the initializer.
+    const scope = this.currentThisScope()
+    const inClassFieldInit = scope.inClassFieldInit
+    scope.inClassFieldInit = true
+    field.value = this.parseMaybeAssign()
+    scope.inClassFieldInit = inClassFieldInit
+  } else {
+    field.value = null
+  }
+  this.semicolon()
+
+  return this.finishNode(field, "PropertyDefinition")
+}
+
+pp.parseClassStaticBlock = function(node) {
+  node.body = []
+
+  let oldLabels = this.labels
+  this.labels = []
+  this.enterScope(SCOPE_CLASS_STATIC_BLOCK | SCOPE_SUPER)
+  while (this.type !== tt.braceR) {
+    let stmt = this.parseStatement(null)
+    node.body.push(stmt)
+  }
+  this.next()
+  this.exitScope()
+  this.labels = oldLabels
+
+  return this.finishNode(node, "StaticBlock")
 }
 
 pp.parseClassId = function(node, isStatement) {
@@ -665,7 +773,63 @@ pp.parseClassId = function(node, isStatement) {
 }
 
 pp.parseClassSuper = function(node) {
-  node.superClass = this.eat(tt._extends) ? this.parseExprSubscripts() : null
+  node.superClass = this.eat(tt._extends) ? this.parseExprSubscripts(false) : null
+}
+
+pp.enterClassBody = function() {
+  const element = {declared: Object.create(null), used: []}
+  this.privateNameStack.push(element)
+  return element.declared
+}
+
+pp.exitClassBody = function() {
+  const {declared, used} = this.privateNameStack.pop()
+  const len = this.privateNameStack.length
+  const parent = len === 0 ? null : this.privateNameStack[len - 1]
+  for (let i = 0; i < used.length; ++i) {
+    const id = used[i]
+    if (!hasOwn(declared, id.name)) {
+      if (parent) {
+        parent.used.push(id)
+      } else {
+        this.raiseRecoverable(id.start, `Private field '#${id.name}' must be declared in an enclosing class`)
+      }
+    }
+  }
+}
+
+function isPrivateNameConflicted(privateNameMap, element) {
+  const name = element.key.name
+  const curr = privateNameMap[name]
+
+  let next = "true"
+  if (element.type === "MethodDefinition" && (element.kind === "get" || element.kind === "set")) {
+    next = (element.static ? "s" : "i") + element.kind
+  }
+
+  // `class { get #a(){}; static set #a(_){} }` is also conflict.
+  if (
+    curr === "iget" && next === "iset" ||
+    curr === "iset" && next === "iget" ||
+    curr === "sget" && next === "sset" ||
+    curr === "sset" && next === "sget"
+  ) {
+    privateNameMap[name] = "true"
+    return false
+  } else if (!curr) {
+    privateNameMap[name] = next
+    return false
+  } else {
+    return true
+  }
+}
+
+function checkKeyName(node, name) {
+  const {computed, key} = node
+  return !computed && (
+    key.type === "Identifier" && key.name === name ||
+    key.type === "Literal" && key.value === name
+  )
 }
 
 // Parses module export declaration.
@@ -676,7 +840,7 @@ pp.parseExport = function(node, exports) {
   if (this.eat(tt.star)) {
     if (this.options.ecmaVersion >= 11) {
       if (this.eatContextual("as")) {
-        node.exported = this.parseIdent(true)
+        node.exported = this.parseModuleExportName()
         this.checkExport(exports, node.exported.name, this.lastTokStart)
       } else {
         node.exported = null
@@ -726,6 +890,10 @@ pp.parseExport = function(node, exports) {
         this.checkUnreserved(spec.local)
         // check if export is defined
         this.checkLocalExport(spec.local)
+
+        if (spec.local.type === "Literal") {
+          this.raise(spec.local.start, "A string literal cannot be used as an exported binding without `from`.")
+        }
       }
 
       node.source = null
@@ -737,7 +905,7 @@ pp.parseExport = function(node, exports) {
 
 pp.checkExport = function(exports, name, pos) {
   if (!exports) return
-  if (has(exports, name))
+  if (hasOwn(exports, name))
     this.raiseRecoverable(pos, "Duplicate export '" + name + "'")
   exports[name] = true
 }
@@ -791,9 +959,13 @@ pp.parseExportSpecifiers = function(exports) {
     } else first = false
 
     let node = this.startNode()
-    node.local = this.parseIdent(true)
-    node.exported = this.eatContextual("as") ? this.parseIdent(true) : node.local
-    this.checkExport(exports, node.exported.name, node.exported.start)
+    node.local = this.parseModuleExportName()
+    node.exported = this.eatContextual("as") ? this.parseModuleExportName() : node.local
+    this.checkExport(
+      exports,
+      node.exported[node.exported.type === "Identifier" ? "name" : "value"],
+      node.exported.start
+    )
     nodes.push(this.finishNode(node, "ExportSpecifier"))
   }
   return nodes
@@ -845,7 +1017,7 @@ pp.parseImportSpecifiers = function() {
     } else first = false
 
     let node = this.startNode()
-    node.imported = this.parseIdent(true)
+    node.imported = this.parseModuleExportName()
     if (this.eatContextual("as")) {
       node.local = this.parseIdent()
     } else {
@@ -856,6 +1028,17 @@ pp.parseImportSpecifiers = function() {
     nodes.push(this.finishNode(node, "ImportSpecifier"))
   }
   return nodes
+}
+
+pp.parseModuleExportName = function() {
+  if (this.options.ecmaVersion >= 13 && this.type === tt.string) {
+    const stringLiteral = this.parseLiteral(this.value)
+    if (loneSurrogate.test(stringLiteral.value)) {
+      this.raise(stringLiteral.start, "An export name cannot include a lone surrogate.")
+    }
+    return stringLiteral
+  }
+  return this.parseIdent(true)
 }
 
 // Set `ExpressionStatement#directive` property for directive prologues.

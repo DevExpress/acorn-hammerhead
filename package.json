@@ -1,7 +1,12 @@
 {
   "name": "acorn-hammerhead",
-  "version": "0.5.0",
-  "description": "",
+  "version": "0.6.0",
+  "description": "acorn.js parser adapted to TestCafe Hammerhead",
+  "license": "MIT",
+  "author": {
+    "name": "Developer Express Inc.",
+    "url": "https://www.devexpress.com/"
+  },
   "main": "lib/index.js",
   "files": [
     "lib",
@@ -11,13 +16,13 @@
     "@types/estree": "0.0.46"
   },
   "devDependencies": {
-    "babel-plugin-add-module-exports": "^0.1.2",
-    "babel-plugin-transform-async-to-generator": "^6.24.1",
-    "babel-preset-env": "^1.6.0",
+    "@babel/core": "^7.17.8",
+    "@babel/preset-env": "^7.16.11",
+    "babel-plugin-add-module-exports": "^0.2.0",
     "del": "^3.0.0",
-    "gulp": "^4.0.0",
-    "gulp-babel": "^6.1.1",
-    "publish-please": "^5.4.3"
+    "gulp": "^4.0.2",
+    "gulp-babel": "^8.0.0",
+    "publish-please": "^5.5.2"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -28,8 +33,6 @@
     "type": "git",
     "url": "git+https://github.com/miherlosev/acorn-hammerhead.git"
   },
-  "author": "miherlosev <miherlosev@mail.ru> (http://devexpress.com/)",
-  "license": "MIT",
   "bugs": {
     "url": "https://github.com/miherlosev/acorn-hammerhead/issues"
   },

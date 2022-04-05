@@ -3,7 +3,7 @@ import {types as tt, keywords as keywordTypes} from "./tokentype.js"
 import {Parser} from "./state.js"
 import {SourceLocation} from "./locutil.js"
 import {RegExpValidationState} from "./regexp.js"
-import {lineBreak, lineBreakG, isNewLine, nonASCIIwhitespace} from "./whitespace.js"
+import {lineBreak, nextLineBreak, isNewLine, nonASCIIwhitespace} from "./whitespace.js"
 
 // Object type used to represent tokens. Note that normally, tokens
 // simply exist as properties on the parser object. This is only
@@ -63,10 +63,6 @@ if (typeof Symbol !== "undefined")
 // Toggle strict mode. Re-reads the next number or string to please
 // pedantic tests (`"use strict"; 010;` should fail).
 
-pp.curContext = function() {
-  return this.context[this.context.length - 1]
-}
-
 // Read a single token, updating the parser object's token-related
 // properties.
 
@@ -93,9 +89,9 @@ pp.readToken = function(code) {
 
 pp.fullCharCodeAtPos = function() {
   let code = this.input.charCodeAt(this.pos)
-  if (code <= 0xd7ff || code >= 0xe000) return code
+  if (code <= 0xd7ff || code >= 0xdc00) return code
   let next = this.input.charCodeAt(this.pos + 1)
-  return (code << 10) + next - 0x35fdc00
+  return next <= 0xdbff || next >= 0xe000 ? code : (code << 10) + next - 0x35fdc00
 }
 
 pp.skipBlockComment = function() {
@@ -104,11 +100,9 @@ pp.skipBlockComment = function() {
   if (end === -1) this.raise(this.pos - 2, "Unterminated comment")
   this.pos = end + 2
   if (this.options.locations) {
-    lineBreakG.lastIndex = start
-    let match
-    while ((match = lineBreakG.exec(this.input)) && match.index < this.pos) {
+    for (let nextBreak, pos = start; (nextBreak = nextLineBreak(this.input, pos, this.pos)) > -1;) {
       ++this.curLine
-      this.lineStart = match.index + match[0].length
+      pos = this.lineStart = nextBreak
     }
   }
   if (this.options.onComment)
@@ -314,6 +308,20 @@ pp.readToken_question = function() { // '?'
   return this.finishOp(tt.question, 1)
 }
 
+pp.readToken_numberSign = function() { // '#'
+  const ecmaVersion = this.options.ecmaVersion
+  let code = 35 // '#'
+  if (ecmaVersion >= 13) {
+    ++this.pos
+    code = this.fullCharCodeAtPos()
+    if (isIdentifierStart(code, true) || code === 92 /* '\' */) {
+      return this.finishToken(tt.privateId, this.readWord1())
+    }
+  }
+
+  this.raise(this.pos, "Unexpected character '" + codePointToString(code) + "'")
+}
+
 pp.getTokenFromCode = function(code) {
   switch (code) {
   // The interpretation of a dot depends on whether it is followed
@@ -358,7 +366,6 @@ pp.getTokenFromCode = function(code) {
   // often referred to. `finishOp` simply skips the amount of
   // characters it is given as second argument, and returns a token
   // of the type given by its first argument.
-
   case 47: // '/'
     return this.readToken_slash()
 
@@ -385,6 +392,9 @@ pp.getTokenFromCode = function(code) {
 
   case 126: // '~'
     return this.finishOp(tt.prefix, 1)
+
+  case 35: // '#'
+    return this.readToken_numberSign()
   }
 
   this.raise(this.pos, "Unexpected character '" + codePointToString(code) + "'")
@@ -569,8 +579,15 @@ pp.readString = function(quote) {
       out += this.input.slice(chunkStart, this.pos)
       out += this.readEscapedChar(false)
       chunkStart = this.pos
+    } else if (ch === 0x2028 || ch === 0x2029) {
+      if (this.options.ecmaVersion < 10) this.raise(this.start, "Unterminated string constant")
+      ++this.pos
+      if (this.options.locations) {
+        this.curLine++
+        this.lineStart = this.pos
+      }
     } else {
-      if (isNewLine(ch, this.options.ecmaVersion >= 10)) this.raise(this.start, "Unterminated string constant")
+      if (isNewLine(ch)) this.raise(this.start, "Unterminated string constant")
       ++this.pos
     }
   }
@@ -663,8 +680,8 @@ pp.readInvalidTemplateToken = function() {
       if (this.input[this.pos + 1] !== "{") {
         break
       }
-    // falls through
 
+    // falls through
     case "`":
       return this.finishToken(tt.invalidTemplate, this.input.slice(this.start, this.pos))
 
@@ -772,7 +789,7 @@ pp.readWord1 = function() {
       let esc = this.readCodePoint()
       if (!(first ? isIdentifierStart : isIdentifierChar)(esc, astral))
         this.invalidStringToken(escStart, "Invalid Unicode escape")
-      word += this.input.substr(this.pos-6, 6);
+      word += this.input.substr(this.pos-6, 6)
       chunkStart = this.pos
     } else {
       break
