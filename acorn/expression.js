@@ -343,7 +343,7 @@ pp.parseSubscript = function(base, startPos, startLoc, noCalls, maybeAsyncArrow,
     }
     node.computed = !!computed
     if (optionalSupported) {
-      node.optional = optional
+      node.optional = optional || node.object.optional;
     }
     base = this.finishNode(node, "MemberExpression")
   } else if (!noCalls && this.eat(tt.parenL)) {
