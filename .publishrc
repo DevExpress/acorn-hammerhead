@@ -8,8 +8,6 @@
     "gitTag": true
   },
   "confirm": false,
-  "publishCommand": "npm publish",
   "publishTag": "latest",
   "prePublishScript": "gulp build",
-  "postPublishScript": false
 }
