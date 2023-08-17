@@ -9,5 +9,5 @@
   },
   "confirm": false,
   "publishTag": "latest",
-  "prePublishScript": "gulp build",
+  "prePublishScript": "gulp build"
 }
